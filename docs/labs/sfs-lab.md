@@ -88,11 +88,13 @@ Each directory entry is just:
 
 ``` c
 typedef struct sfs_dir_entry_t {
-    block_id first_block;
-    uint32_t size;
-    char name[24];
+    block_id first_block; /**< First block; 0 = unused, EMPTY sentinel = no data */
+    uint32_t size;        /**< Size of file in bytes */
+    char name[SFS_FILE_NAME_SIZE_LIMIT]; /**< NUL-terminated name */
 } sfs_dir_entry_t;
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.h#L90-L95"><code>sfs-disk.h</code> L90–L95</a> (reformatted to fit)</p>
 
 So a file is represented by one directory entry plus a linked chain of `FILE` blocks:
 
@@ -107,8 +109,13 @@ The root directory begins inside the super block and grows by chaining `DIR` blo
 The optional extension format adds one extra encoding in `sfs-disk.h`:
 
 ``` c
+/** Developer-branch encoding for a live empty file with no data block.
+    Valid block IDs are always smaller than the uint32_t block count, so this
+    value can never name a mapped block. */
 #define SFS_EMPTY_FILE_BLOCK UINT32_MAX
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.h#L49-L52"><code>sfs-disk.h</code> L49–L52</a> (reformatted to fit)</p>
 
 That creates a three-way distinction for `first_block`:
 
@@ -151,20 +158,20 @@ openFileDescTable[fd]
 The two in-memory structs are:
 
 ``` c
+/** This struct corresponds to what CS:APP calls a "v-node table" entry. */
 typedef struct sfs_mem_file_t {
-    uint32_t refCount;
-    int tableIndex;
-    int unlinked;
-    pthread_mutex_t lock;
-    sfs_dir_entry_t *diskFile;
-    sfs_dir_entry_t unlinkedFile;
+    uint32_t refCount; int tableIndex; int unlinked; pthread_mutex_t lock;
+    sfs_dir_entry_t *diskFile; sfs_dir_entry_t unlinkedFile;
 } sfs_mem_file_t;
 
+/** This struct corresponds to what CS:APP calls an "open file table" entry.
+    The "descriptor table" is the openFileDescTable array itself. */
 typedef struct sfs_mem_filedesc_t {
-    sfs_mem_file_t *fileEntry;
-    size_t currPos;
+    sfs_mem_file_t *fileEntry; size_t currPos;
 } sfs_mem_filedesc_t;
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L70-L87"><code>sfs-disk.c</code> L70–L87</a> (reformatted to fit)</p>
 
 This split gives two immediate properties:
 
@@ -176,17 +183,23 @@ This split gives two immediate properties:
 The helper `unlinkDirectoryEntry` is the core of both `sfs_remove` and overwrite-style `sfs_rename`:
 
 ``` c
-if (open != NULL) {
-    pthread_mutex_lock(&open->lock);
-    open->unlinkedFile = *entry;
-    open->diskFile = &open->unlinkedFile;
-    open->unlinked = 1;
-    pthread_mutex_unlock(&open->lock);
-} else if (entry->first_block != SFS_EMPTY_FILE_BLOCK) {
-    freeBlocks(entry->first_block);
+/** Remove ENTRY while the directory and open-file tables are write-locked. */
+static void unlinkDirectoryEntry(sfs_dir_entry_t *entry) {
+    sfs_mem_file_t *open = findOpenFile(entry);
+    if (open != NULL) {
+        pthread_mutex_lock(&open->lock);
+        open->unlinkedFile = *entry;
+        open->diskFile = &open->unlinkedFile;
+        open->unlinked = 1;
+        pthread_mutex_unlock(&open->lock);
+    } else if (entry->first_block != SFS_EMPTY_FILE_BLOCK) {
+        freeBlocks(entry->first_block);
+    }
+    memset(entry, 0, sizeof *entry);
 }
-memset(entry, 0, sizeof *entry);
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L486-L503"><code>sfs-disk.c</code> L486–L503</a> (reformatted to fit)</p>
 
 If the file is closed, its blocks can go back to the free list immediately. If it is open, the directory entry is copied into `unlinkedFile`, `diskFile` is redirected to that private copy, and the visible directory slot is cleared.
 
@@ -205,15 +218,29 @@ That gives SFS the Unix rule in compact form: removing a file destroys its **nam
 `sfs_seek` is slightly more careful because it has to move backward without invoking signed-overflow undefined behavior:
 
 ``` c
-if (delta < 0) {
-    size_t distance = (size_t)(-(delta + 1)) + 1;
-    position = distance > position ? 0 : position - distance;
-} else {
-    size_t distance = (size_t)delta;
-    position =
-        distance > file_size - position ? file_size : position + distance;
+ssize_t sfs_seek(int fd, ssize_t delta) {
+    sfs_mem_filedesc_t *descriptor = lockDescriptor(fd);
+    if (descriptor == NULL)
+        return -EBADF;
+    sfs_mem_file_t *file = descriptor->fileEntry;
+    pthread_mutex_lock(&file->lock);
+    size_t position = descriptor->currPos;
+    size_t file_size = file->diskFile->size;
+    if (delta < 0) {
+        size_t distance = (size_t)(-(delta + 1)) + 1;
+        position = distance > position ? 0 : position - distance;
+    } else {
+        size_t distance = (size_t)delta;
+        position =
+            distance > file_size - position ? file_size : position + distance;
+    }
+    descriptor->currPos = position;
+    pthread_mutex_unlock(&file->lock); pthread_mutex_unlock(&descriptorLocks[fd]);
+    return (ssize_t)position;
 }
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L928-L952"><code>sfs-disk.c</code> L928–L952</a> (reformatted to fit)</p>
 
 The rule matches the API comment in `sfs-api.h`: the result is always clamped into `[0, file_size]`. SFS deliberately does **not** allow a seek position past EOF.
 
@@ -223,38 +250,51 @@ The `-(delta + 1) + 1` pattern matters because directly negating the most negati
 
 The required behavior is stronger than “change the string in the directory entry.” If `new_name` already exists, SFS has to replace it **atomically**: no other thread should ever observe a gap where `new_name` does not exist.
 
-The implementation keeps the directory and open-file tables write-locked for the entire operation:
+The implementation takes both write locks — the directory and the open-file table — after validating its arguments, and holds them across the whole namespace change:
+
+Branch order: validate the names · take both write locks · `-ENOENT` if the source is missing · a same-name rename is a no-op · unlink an existing target · rewrite the name bytes · unlock in reverse order.
 
 ``` c
-pthread_rwlock_wrlock(&directoryLock);
-pthread_rwlock_wrlock(&openTableLock);
+int sfs_rename(const char *old_name, const char *new_name) {
+    if (old_name[0] == '\0' || new_name[0] == '\0')
+        return -EINVAL;
 
-sfs_dir_entry_t *old_entry = findDirectoryEntry(old_name, NULL, NULL);
-if (old_entry == NULL) {
-    pthread_rwlock_unlock(&openTableLock);
-    pthread_rwlock_unlock(&directoryLock);
-    return -ENOENT;
-}
+    if (strnlen(old_name, SFS_FILE_NAME_SIZE_LIMIT + 1) + 1 >
+            SFS_FILE_NAME_SIZE_LIMIT ||
+        strnlen(new_name, SFS_FILE_NAME_SIZE_LIMIT + 1) + 1 >
+            SFS_FILE_NAME_SIZE_LIMIT)
+        return -ENAMETOOLONG;
 
-if (strcmp(old_name, new_name) == 0) {
-    pthread_rwlock_unlock(&openTableLock);
-    pthread_rwlock_unlock(&directoryLock);
+    if (getSFSStatus() < 0)
+        return -ENOMEDIUM;
+
+    pthread_rwlock_wrlock(&directoryLock); pthread_rwlock_wrlock(&openTableLock);
+    sfs_dir_entry_t *old_entry = findDirectoryEntry(old_name, NULL, NULL);
+    if (old_entry == NULL) {
+        pthread_rwlock_unlock(&openTableLock); pthread_rwlock_unlock(&directoryLock);
+        return -ENOENT;
+    }
+
+    if (strcmp(old_name, new_name) == 0) {
+        pthread_rwlock_unlock(&openTableLock); pthread_rwlock_unlock(&directoryLock);
+        return 0;
+    }
+
+    sfs_dir_entry_t *new_entry = findDirectoryEntry(new_name, NULL, NULL);
+    if (new_entry != NULL)
+        unlinkDirectoryEntry(new_entry);
+
+    size_t len = strlen(new_name);
+    memcpy(old_entry->name, new_name, len);
+    memset(old_entry->name + len, '\0', SFS_FILE_NAME_SIZE_LIMIT - len);
+
+    pthread_rwlock_unlock(&openTableLock); pthread_rwlock_unlock(&directoryLock);
     return 0;
 }
-
-sfs_dir_entry_t *new_entry = findDirectoryEntry(new_name, NULL, NULL);
-if (new_entry != NULL)
-    unlinkDirectoryEntry(new_entry);
-
-size_t len = strlen(new_name);
-memcpy(old_entry->name, new_name, len);
-memset(old_entry->name + len, '\0', SFS_FILE_NAME_SIZE_LIMIT - len);
-
-pthread_rwlock_unlock(&openTableLock);
-pthread_rwlock_unlock(&directoryLock);
 ```
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L985-L1027"><code>sfs-disk.c</code> L985–L1027</a> (reformatted to fit)</p>
 
-The key is that `unlinkDirectoryEntry(new_entry)` and the rename of `old_entry` happen under the same lock interval. Other threads see either the old namespace or the finished new one, never the half-updated state in between.
+`unlinkDirectoryEntry(new_entry)` and the rename of `old_entry` happen under the same lock interval. Other threads see either the old namespace or the finished new one, never the half-updated state in between.
 
 Because overwrite-rename uses the same unlink path as `sfs_remove`, an already-open target file keeps working after replacement. Its descriptors now point at `unlinkedFile`, and its blocks are reclaimed only on final close.
 
@@ -262,44 +302,114 @@ Because overwrite-rename uses the same unlink path as `sfs_remove`, an already-o
 
 The graded API permits short writes, but this implementation takes an all-or-nothing path when a write needs more blocks: if the final size cannot be allocated, it returns `-ENOSPC` before touching the file.
 
-The first step is to reserve all additional blocks up front:
+The whole operation is decided before a byte is copied: every additional block is reserved up front, and a failure there returns before the file is touched.
+
+Branch order: lock the descriptor and file · reject `-EFBIG` and zero-length writes · reserve the blocks a growth needs · copy 500-byte chunks · attach the reserved chain only at the old tail · unlock.
 
 ``` c
-if (endPos > fileAllocSize) {
-    size_t fileNewAllocSize = roundUp(endPos, BLOCK_DATA_SIZE);
-    uint32_t addlBlocks =
-        (uint32_t)((fileNewAllocSize - fileAllocSize) / BLOCK_DATA_SIZE);
+ssize_t sfs_write(int fd, const char *buf, size_t len) {
+    sfs_mem_filedesc_t *tFile = lockDescriptor(fd);
+    if (tFile == NULL)
+        return -EBADF;
+    sfs_mem_file_t *file = tFile->fileEntry;
+    pthread_mutex_lock(&file->lock);
 
-    firstNewId = allocateBlocks(addlBlocks, SFS_BLOCK_TYPE_FILE);
-    if (firstNewId == 0) {
-        pthread_mutex_unlock(&file->lock);
-        pthread_mutex_unlock(&descriptorLocks[fd]);
-        return -ENOSPC;
+    size_t fileSize = file->diskFile->size;
+    size_t currPos = tFile->currPos;
+    assert(currPos <= fileSize);
+
+    // This implementation does not do a partial write if there is
+    // insufficient space on disk for the complete write; it always
+    // either writes all 'len' bytes, or none.
+    if (len > SFS_MAX_FILE_SIZE - currPos) {
+        pthread_mutex_unlock(&file->lock); pthread_mutex_unlock(&descriptorLocks[fd]);
+        return -EFBIG;
     }
+    if (len == 0) {
+        pthread_mutex_unlock(&file->lock); pthread_mutex_unlock(&descriptorLocks[fd]);
+        return 0;
+    }
+
+    size_t fileAllocSize =
+        (size_t)allocatedBlocksForFile(file->diskFile) * BLOCK_DATA_SIZE;
+    size_t endPos = len + currPos;
+    size_t toWrite = len;
+
+    // If we need to enlarge the file, do so now, and if we can't make
+    // it big enough, fail the whole operation.
+    block_id firstNewId = 0;
+    if (endPos > fileAllocSize) {
+        size_t fileNewAllocSize = roundUp(endPos, BLOCK_DATA_SIZE);
+        uint32_t addlBlocks =
+            (uint32_t)((fileNewAllocSize - fileAllocSize) / BLOCK_DATA_SIZE);
+        assert(addlBlocks >= 1);
+
+        firstNewId = allocateBlocks(addlBlocks, SFS_BLOCK_TYPE_FILE);
+        if (firstNewId == 0) {
+            pthread_mutex_unlock(&file->lock);
+            pthread_mutex_unlock(&descriptorLocks[fd]); return -ENOSPC;
+        }
+    }
+
+    // Copy chunks of data from the caller's buffer to the mapped disk image.
+    // See comments above the very similar loop in sfs_read() for more detail.
+    sfs_block_file_t *diskBlock;
+    block_id first = file->diskFile->first_block;
+    if (first == SFS_EMPTY_FILE_BLOCK) {
+        assert(fileSize == 0 && currPos == 0 && firstNewId != 0);
+        diskBlock = accessFileBlock(firstNewId);
+        file->diskFile->first_block = firstNewId;
+        firstNewId = 0;
+    } else {
+        assert(first != 0);
+        diskBlock = accessFileBlock(blockForPosition(first, currPos));
+    }
+    size_t blockPos = currPos % BLOCK_DATA_SIZE;
+    size_t chunkSize =
+        sizeMin(roundUp(currPos, BLOCK_DATA_SIZE) - currPos, toWrite);
+    for (;;) {
+        // The chunk size can be zero on the first iteration, if the
+        // starting position was exactly at a block boundary.
+        if (chunkSize > 0) {
+            memcpy(&diskBlock->data[blockPos], buf, chunkSize);
+            buf += chunkSize;
+            toWrite -= chunkSize;
+        }
+        if (toWrite == 0)
+            break;
+
+        blockPos = 0;
+        chunkSize = sizeMin(BLOCK_DATA_SIZE, toWrite);
+        sfs_block_file_t *nextBlock = accessFileBlock(diskBlock->h.next_block);
+        if (nextBlock == NULL) {
+            // We should only get here once, at most, per write call.
+            assert(firstNewId != 0);
+            // We have just advanced the file position to the end of the
+            // original allocation for the file.  Attach the additional
+            // blocks beginning at 'firstNewId' to the end of the file,
+            // and continue.
+            nextBlock = accessFileBlock(firstNewId);
+            diskBlock->h.next_block = firstNewId;
+            nextBlock->h.prev_block = idOfBlock(&diskBlock->h);
+            firstNewId = 0;
+        }
+        diskBlock = nextBlock;
+    }
+
+    tFile->currPos = endPos;
+    if (endPos > fileSize) {
+        assert(endPos <= SFS_MAX_FILE_SIZE);
+        file->diskFile->size = (uint32_t)endPos;
+    }
+    pthread_mutex_unlock(&file->lock); pthread_mutex_unlock(&descriptorLocks[fd]);
+    return (ssize_t)len;
 }
 ```
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L681-L793"><code>sfs-disk.c</code> L681–L793</a> (reformatted to fit)</p>
 
-Only after allocation succeeds does the write path start copying bytes into file blocks. If the file used to be empty, the first successful write swaps the empty-file sentinel for the new chain head:
+Only after that reservation succeeds does the copy loop run. If the file used to be empty, the first successful write swaps the empty-file sentinel for the new chain head.
 
-``` c
-if (first == SFS_EMPTY_FILE_BLOCK) {
-    diskBlock = accessFileBlock(firstNewId);
-    file->diskFile->first_block = firstNewId;
-    firstNewId = 0;
-}
-```
-
-If the file already had data, the new chain is attached only when the copy loop reaches the old tail:
-
-``` c
-sfs_block_file_t *nextBlock = accessFileBlock(diskBlock->h.next_block);
-if (nextBlock == NULL) {
-    nextBlock = accessFileBlock(firstNewId);
-    diskBlock->h.next_block = firstNewId;
-    nextBlock->h.prev_block = idOfBlock(&diskBlock->h);
-    firstNewId = 0;
-}
-```
+If the file already had data, the new chain is attached when the copy loop reaches the old tail.
 
 So allocation failure leaves the old file untouched, and successful growth preserves a valid block chain throughout.
 
@@ -307,27 +417,80 @@ So allocation failure leaves the old file untouched, and successful growth prese
 
 Once the current block is known, both `sfs_read` and `sfs_write` iterate one chunk at a time, never crossing a block boundary in a single copy:
 
+Branch order: lock · clamp the request to what the file holds · copy chunk by chunk · unlock.
+
 ``` c
-size_t blockPos = currPos % BLOCK_DATA_SIZE;
-size_t chunkSize =
-    sizeMin(roundUp(currPos, BLOCK_DATA_SIZE) - currPos, toRead);
+ssize_t sfs_read(int fd, char *buf, size_t len) {
+    sfs_mem_filedesc_t *tFile = lockDescriptor(fd);
+    if (tFile == NULL)
+        return -EBADF;
+    sfs_mem_file_t *file = tFile->fileEntry;
+    pthread_mutex_lock(&file->lock);
 
-for (;;) {
-    if (chunkSize > 0) {
-        memcpy(buf, &diskBlock->data[blockPos], chunkSize);
-        buf += chunkSize;
-        toRead -= chunkSize;
+    // We are going to read 'len' bytes, or the amount of data remaining
+    // in the file, whichever is smaller.
+    // This subtraction cannot produce a value larger than SSIZE_MAX
+    // because it's impossible for a file in SFS to be that large.
+    size_t fileSize = file->diskFile->size;
+    size_t currPos = tFile->currPos;
+
+    assert(currPos <= fileSize);
+    size_t totalToRead = sizeMin(fileSize - currPos, len);
+
+    size_t toRead = totalToRead;
+    if (toRead == 0) {
+        pthread_mutex_unlock(&file->lock); pthread_mutex_unlock(&descriptorLocks[fd]);
+        return 0;
     }
-    if (toRead == 0)
-        break;
 
-    blockPos = 0;
-    chunkSize = sizeMin(BLOCK_DATA_SIZE, toRead);
-    diskBlock = accessFileBlock(diskBlock->h.next_block);
+    // Copy chunks of data from the mapped disk image to the caller's buffer.
+    //
+    // Each chunk is the smaller of:
+    //  - the amount of data still to be read
+    //  - the amount of data between currPos and the end of the current block
+    // This number can be different from BLOCK_DATA_SIZE only for the
+    // very first and the very last chunk of a read operation.
+    //
+    // Each chunk starts at the beginning of a disk block's data area,
+    // except the very first chunk, which will begin in the middle of a
+    // data area if the previous read or seek operation left the file
+    // position not a multiple of BLOCK_DATA_SIZE.
+    block_id first = file->diskFile->first_block;
+    assert(first != 0 && first != SFS_EMPTY_FILE_BLOCK);
+    sfs_block_file_t *diskBlock =
+        accessFileBlock(blockForPosition(first, currPos));
+    size_t blockPos = currPos % BLOCK_DATA_SIZE;
+    size_t chunkSize =
+        sizeMin(roundUp(currPos, BLOCK_DATA_SIZE) - currPos, toRead);
+    for (;;) {
+        // The chunk size can be zero on the first iteration, if the
+        // starting position was exactly at a block boundary.
+        if (chunkSize > 0) {
+            memcpy(buf, &diskBlock->data[blockPos], chunkSize);
+            buf += chunkSize;
+            toRead -= chunkSize;
+        }
+        if (toRead == 0)
+            break;
+
+        blockPos = 0;
+        chunkSize = sizeMin(BLOCK_DATA_SIZE, toRead);
+        diskBlock = accessFileBlock(diskBlock->h.next_block);
+        // This could only happen legitimately if we were reading to the end
+        // of a file whose size was an exact multiple of BLOCK_DATA_SIZE, but
+        // then we would already have exited the loop.
+        assert(diskBlock != NULL);
+    }
+
+    tFile->currPos = currPos + totalToRead;
+
+    pthread_mutex_unlock(&file->lock); pthread_mutex_unlock(&descriptorLocks[fd]);
+    return (ssize_t)totalToRead;
 }
 ```
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L607-L679"><code>sfs-disk.c</code> L607–L679</a> (reformatted to fit)</p>
 
-At an exact block boundary, the first `chunkSize` is zero, so the loop advances once before copying. Everywhere else, the first chunk consumes only the remainder of the current block. That keeps the logic uniform for both boundary and non-boundary positions.
+At a nonzero multiple of 500 the first `chunkSize` is zero, so the loop advances once before copying; at position 0 `roundUp` returns a full block instead, and every other position consumes just the remainder of the current block. That keeps the logic uniform for boundary and non-boundary positions alike.
 
 ---
 
@@ -356,8 +519,8 @@ Not every function uses every lock, but no function reverses that order.
 The scalability pivot is `lockDescriptor(fd)`:
 
 ``` c
-static sfs_mem_filedesc_t *lockDescriptor(int fd)
-{
+/** Lock FD's permanent table slot and return its live descriptor, if any. */
+static sfs_mem_filedesc_t *lockDescriptor(int fd) {
     if (fd < 0 || fd >= OPEN_FILE_LIMIT)
         return NULL;
     pthread_once(&descriptorLocksOnce, initializeDescriptorLocks);
@@ -368,6 +531,8 @@ static sfs_mem_filedesc_t *lockDescriptor(int fd)
     return descriptor;
 }
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L114-L125"><code>sfs-disk.c</code> L114–L125</a> (reformatted to fit)</p>
 
 A `getpos` call needs only its descriptor slot; operations that inspect or change file state add the per-file lock:
 
@@ -388,20 +553,10 @@ The open-table lock remains necessary for `open`, `close`, `remove`, `rename`, a
 
 ### Descriptor positions are simple; block locations are derived
 
-The starter design this article grew from cached more block-related state in each descriptor. This implementation keeps only `currPos`:
+The starter design this article grew from cached more block-related state in each descriptor. This implementation keeps only `currPos` — the two-field `sfs_mem_filedesc_t` shown [above](#one-open-file-becomes-three-objects) — and derives the current block whenever it is needed, from the file's head block and the byte position:
 
 ``` c
-typedef struct sfs_mem_filedesc_t {
-    sfs_mem_file_t *fileEntry;
-    size_t currPos;
-} sfs_mem_filedesc_t;
-```
-
-Whenever the code needs the current block, it derives it from the file's head block and the byte position:
-
-``` c
-static block_id blockForPosition(block_id first, size_t position)
-{
+static block_id blockForPosition(block_id first, size_t position) {
     if (first == 0)
         return 0;
     uint32_t index = (uint32_t)(position / BLOCK_DATA_SIZE);
@@ -410,6 +565,8 @@ static block_id blockForPosition(block_id first, size_t position)
     return idOfBlock(&fileBlockAt(first, index)->h);
 }
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L287-L295"><code>sfs-disk.c</code> L287–L295</a> (reformatted to fit)</p>
 
 That removes one class of synchronization work. When an empty file receives its first block, or `ftruncate` frees tail blocks, there are no cached block IDs scattered across live descriptors that now need repair. The only persistent per-descriptor state is the byte position.
 
@@ -421,22 +578,64 @@ Directory operations cannot reason only about names.
 
 `findDirectoryEntry` and `sfs_list` both do this before deciding whether a slot is occupied:
 
+Scan order: the 15 entries in the super block · every chained `DIR` block after that — under the file lock when a slot is live.
+
 ``` c
-sfs_mem_file_t *open = findOpenFile(entry);
-if (open != NULL)
-    pthread_mutex_lock(&open->lock);
-int occupied = entry->first_block != 0;
-int matches = occupied && strcmp(entry->name, name) == 0;
-if (open != NULL)
-    pthread_mutex_unlock(&open->lock);
+static sfs_dir_entry_t *findDirectoryEntry(const char *name,
+                                           sfs_dir_entry_t **empty_out,
+                                           block_id *last_dir_out) {
+    sfs_filesystem_t *super = accessSuperBlock();
+    sfs_dir_entry_t *empty = NULL;
+    for (size_t i = 0; i < DIR_ENTRIES_PER_BLOCK; i++) {
+        sfs_dir_entry_t *entry = &super->files[i];
+        sfs_mem_file_t *open = findOpenFile(entry);
+        if (open != NULL)
+            pthread_mutex_lock(&open->lock);
+        int occupied = entry->first_block != 0;
+        int matches = occupied && strcmp(entry->name, name) == 0;
+        if (open != NULL)
+            pthread_mutex_unlock(&open->lock);
+        if (matches)
+            return entry;
+        if (empty == NULL && !occupied)
+            empty = entry;
+    }
+
+    block_id last = 0;
+    for (block_id id = super->next_rootdir; id != 0;) {
+        sfs_block_dir_t *dir = accessDirectoryBlock(id);
+        last = id;
+        for (size_t i = 0; i < DIR_ENTRIES_PER_BLOCK; i++) {
+            sfs_dir_entry_t *entry = &dir->files[i];
+            sfs_mem_file_t *open = findOpenFile(entry);
+            if (open != NULL)
+                pthread_mutex_lock(&open->lock);
+            int occupied = entry->first_block != 0;
+            int matches = occupied && strcmp(entry->name, name) == 0;
+            if (open != NULL)
+                pthread_mutex_unlock(&open->lock);
+            if (matches)
+                return entry;
+            if (empty == NULL && !occupied)
+                empty = entry;
+        }
+        id = dir->h.next_block;
+    }
+    if (empty_out != NULL)
+        *empty_out = empty;
+    if (last_dir_out != NULL)
+        *last_dir_out = last;
+    return NULL;
+}
 ```
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/SFS_Lab/sfslab/sfs-disk.c#L402-L451"><code>sfs-disk.c</code> L402–L451</a> (reformatted to fit)</p>
 
 Why? Because `first_block` lives inside the directory entry, but it changes under the file lock when:
 
 - an empty file receives its first data block,
 - `ftruncate` grows or shrinks the allocation.
 
-So a directory scan sometimes depends on file metadata that is mutable elsewhere. The fix is to follow that data dependency to the lock that already owns it.
+So a directory scan sometimes depends on file metadata that is mutable elsewhere. The scan therefore follows that data dependency to the lock that already owns it.
 
 ### `sfs_list` uses a physical slot cookie
 

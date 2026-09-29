@@ -47,23 +47,30 @@ A browser sends an **absolute URI** to the proxy; the origin server expects only
 The lab traffic uses URIs of the form `http://host[:port]/path`. `parse_uri` edits that string directly:
 
 ``` c
-head = strstr(uri, "//") + 2;
-if ((tail = strchr(head, ':')) == NULL) {
-    strcpy(port, "80");
-    tail = strchr(head, '/');
-    *tail = '\0';
-    strcpy(hostname, head);
-} else {
-    *tail++ = '\0';
-    strcpy(hostname, head);
-    head = tail;
-    tail = strchr(head, '/');
-    *tail = '\0';
-    strcpy(port, head);
+void parse_uri(char *uri, char *hostname, char *path, char *port) {
+    char *head; char *tail;
+
+    head = strstr(uri, "//");
+    head += 2;
+    if ((tail = strchr(head, ':')) == NULL) {
+        strcpy(port, "80");
+        tail = strchr(head, '/');
+        *tail = '\0';
+        strcpy(hostname, head);
+    } else {
+        *tail++ = '\0';
+        strcpy(hostname, head);
+        head = tail;
+        tail = strchr(head, '/');
+        *tail = '\0';
+        strcpy(port, head);
+    }
+    *tail = '/';
+    strcpy(path, tail); return;
 }
-*tail = '/';
-strcpy(path, tail);
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Proxy_Lab/proxylab-handout/proxy.c#L151-L175"><code>proxy.c</code> L151–L175</a> (full function) (reformatted to fit)</p>
 
 A request like
 
@@ -84,20 +91,69 @@ If the URI omits a port, the proxy supplies `80`. The cache key is then normaliz
 
 ### Rebuild the request; do not tunnel the client's headers blindly { data-toc-label="Request headers" }
 
-The outgoing request always starts in one fixed shape:
+`doit` is the whole request path — accept a line, reject anything but `GET`, resolve the URI, serve a hit from the cache, and otherwise open the origin. The outgoing request always starts in one fixed shape:
 
 ``` c
-snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\n", path);
-Rio_writen(serverfd, request, strlen(request));
+void doit(int clientfd) {
+    char buf[MAXLINE], request[2 * MAXLINE];
+    char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    char hostname[MAXLINE], path[MAXLINE], port[MAXLINE];
+    char key[3 * MAXLINE], object[MAX_OBJECT_SIZE]; rio_t client_rio, server_rio;
+    int serverfd, cacheable = 1;
+    ssize_t n;
+    size_t object_size = 0;
 
-snprintf(request, sizeof(request), "Host: %s\r\n", hostname);
-Rio_writen(serverfd, request, strlen(request));
-Rio_writen(serverfd, user_agent_hdr, strlen(user_agent_hdr));
-Rio_writen(serverfd, "Connection: close\r\n",
-           strlen("Connection: close\r\n"));
-Rio_writen(serverfd, "Proxy-Connection: close\r\n",
-           strlen("Proxy-Connection: close\r\n"));
+    /* Read request line and headers */
+    Rio_readinitb(&client_rio, clientfd);
+    if (!Rio_readlineb(&client_rio, buf, MAXLINE))
+        return;
+    sscanf(buf, "%s %s %s", method, uri, version);
+    if (strcasecmp(method, "GET")) {
+        clienterror(clientfd, method, "501", "Not Implemented",
+                    "Proxy does not implement this method");
+        return;
+    }
+    parse_uri(uri, hostname, path, port);
+    snprintf(key, sizeof(key), "%s:%s%s", hostname, port, path);
+    if (cache_get(key, object, &object_size)) {
+        Rio_writen(clientfd, object, object_size); return;
+    }
+
+    serverfd = Open_clientfd(hostname, port);
+
+    /* Build proxy request headers */
+    snprintf(request, sizeof(request), "GET %s HTTP/1.0\r\n", path);
+    Rio_writen(serverfd, request, strlen(request));
+    snprintf(request, sizeof(request), "Host: %s\r\n", hostname);
+    Rio_writen(serverfd, request, strlen(request));
+    Rio_writen(serverfd, user_agent_hdr, strlen(user_agent_hdr));
+    Rio_writen(serverfd, "Connection: close\r\n",
+              strlen("Connection: close\r\n"));
+    Rio_writen(serverfd, "Proxy-Connection: close\r\n",
+              strlen("Proxy-Connection: close\r\n"));
+
+    /* Forward client request */
+    forward_request(&client_rio, serverfd);
+
+    /* Forward server request */
+    Rio_readinitb(&server_rio, serverfd);
+    while ((n = Rio_readnb(&server_rio, buf, MAXBUF)) > 0) {
+        Rio_writen(clientfd, buf, n);
+        if (cacheable && object_size + (size_t)n <= MAX_OBJECT_SIZE) {
+            memcpy(object + object_size, buf, n);
+            object_size += n;
+        } else {
+            cacheable = 0;
+        }
+    }
+    Close(serverfd);
+    if (cacheable)
+        cache_put(key, object, object_size);
+}
 ```
+
+Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Proxy_Lab/proxylab-handout/proxy.c#L67-L126"><code>proxy.c</code> L67–L126</a> (full function)
+{: .code-source }
 
 Then `forward_request` reads the remaining client headers and filters the four headers this proxy handles specially:
 
@@ -113,14 +169,7 @@ The header loop stops on the blank line `\r\n`, and the proxy writes one final b
 
 ### Relay bytes, not strings
 
-The response path is binary-safe because it uses the byte count returned by `Rio_readnb`:
-
-``` c
-while ((n = Rio_readnb(&server_rio, buf, MAXBUF)) > 0)
-    Rio_writen(clientfd, buf, n);
-```
-
-That `n` matters. A JPEG, PDF, or executable can contain `\0` bytes long before the end of the response, so `strlen` would truncate it.
+The response path is binary-safe because it uses the byte count returned by `Rio_readnb` rather than a string length. That `n` matters: a JPEG, PDF, or executable can contain `\0` bytes long before the end of the response, so a `strlen`-based copy would truncate it.
 
 ---
 
@@ -129,24 +178,44 @@ That `n` matters. A JPEG, PDF, or executable can contain `\0` bytes long before 
 A correct sequential proxy still fails the concurrency part of the lab. One slow origin would occupy the only control path and block every later client. The smallest fix is one detached thread per accepted connection:
 
 ``` c
-while (1) {
-    connfd = Malloc(sizeof(int));
-    *connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-    Pthread_create(&tid, NULL, thread, connfd);
-}
+int main(int argc, char **argv) {
+    int listenfd, *connfd; socklen_t clientlen; struct sockaddr_storage clientaddr;
+    pthread_t tid;
 
-void *thread(void *vargp)
-{
+    /* Check command line args */
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(1);
+    }
+    Signal(SIGPIPE, SIG_IGN);
+    listenfd = Open_listenfd(argv[1]);
+
+    while (1) {
+        clientlen = sizeof(clientaddr);
+        connfd = Malloc(sizeof(int));
+        *connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+        Pthread_create(&tid, NULL, thread, connfd);
+    }
+    return 0;
+}
+```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Proxy_Lab/proxylab-handout/proxy.c#L30-L52"><code>proxy.c</code> L30–L52</a> (<code>main</code>, the accept loop) (reformatted to fit)</p>
+
+``` c
+void *thread(void *vargp) {
     Pthread_detach(pthread_self());
 
     int connfd = *((int *)vargp);
     Free(vargp);
 
-    doit(connfd);
-    Close(connfd);
+    doit(connfd); Close(connfd);
+
     return NULL;
 }
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Proxy_Lab/proxylab-handout/proxy.c#L54-L65"><code>proxy.c</code> L54–L65</a> (<code>thread</code>, one detached worker per connection) (reformatted to fit)</p>
 
 The heap-allocated `connfd` is an ownership handoff, not shared state. The accept loop produces one descriptor, the worker consumes it, and the temporary heap cell disappears immediately. Passing `&connfd` from the loop stack would race as soon as the next `Accept` overwrote the same slot.
 
@@ -163,13 +232,14 @@ The cache stores the entire origin response — headers and body together — un
 
 ``` c
 typedef struct cache_object {
-    char *key;
-    char *data;
-    size_t size;
-    unsigned long recent;
-    struct cache_object *next;
+    char *key; char *data; size_t size; unsigned long recent; struct cache_object *next;
 } cache_object;
+
+static cache_object *cache; static size_t cache_size; static unsigned long cache_clock;
+static pthread_rwlock_t cache_lock = PTHREAD_RWLOCK_INITIALIZER;
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Proxy_Lab/proxylab-handout/proxy.c#L7-L18"><code>proxy.c</code> L7–L18</a> (<code>cache_object</code> and its global state) (reformatted to fit)</p>
 
 Each object owns exact-sized heap copies of its key and response bytes. That makes the cache budget precise: `cache_size` counts stored response bytes only, which is exactly what the handout limits.
 
@@ -182,25 +252,7 @@ Each object owns exact-sized heap copies of its key and response bytes. That mak
 | Binary-safe storage | Copy each chunk with `memcpy(..., n)` |
 | One key stored once | Re-check for an existing key while holding the write lock |
 
-On a miss, the worker relays the response to the client and simultaneously accumulates a **private** cache candidate in its stack buffer `object[MAX_OBJECT_SIZE]`:
-
-``` c
-while ((n = Rio_readnb(&server_rio, buf, MAXBUF)) > 0) {
-    Rio_writen(clientfd, buf, n);
-    if (cacheable && object_size + (size_t)n <= MAX_OBJECT_SIZE) {
-        memcpy(object + object_size, buf, n);
-        object_size += n;
-    }
-    else {
-        cacheable = 0;
-    }
-}
-
-if (cacheable)
-    cache_put(key, object, object_size);
-```
-
-Once the response grows past 100 KiB, the proxy stops extending the private copy but keeps forwarding the rest of the bytes to the client. Oversized responses still reach the client intact; only the cache copy is abandoned.
+On a miss, the worker relays the response to the client and simultaneously accumulates a **private** cache candidate in its stack buffer `object[MAX_OBJECT_SIZE]`, in the relay loop of `doit` above. Once the response grows past 100 KiB, the proxy stops extending the private copy but keeps forwarding the rest of the bytes to the client. Oversized responses still reach the client intact; only the cache copy is abandoned.
 
 ### Many readers, one writer { data-toc-label="Reader-writer locking" }
 
@@ -220,29 +272,73 @@ The first lookup's `object` pointer cannot be reused after releasing the read lo
 `recent` is mutable metadata, so `cache_get` reacquires the write side to update it:
 
 ``` c
-pthread_rwlock_wrlock(&cache_lock);
-for (object = cache; object; object = object->next) {
-    if (!strcmp(object->key, key)) {
-        object->recent = ++cache_clock;
-        break;
+int cache_get(const char *key, char *data, size_t *size) {
+    cache_object *object;
+    int found = 0;
+
+    pthread_rwlock_rdlock(&cache_lock);
+    for (object = cache; object; object = object->next) {
+        if (!strcmp(object->key, key)) {
+            memcpy(data, object->data, object->size);
+            *size = object->size;
+            found = 1;
+            break;
+        }
     }
+    pthread_rwlock_unlock(&cache_lock);
+
+    if (!found)
+        return 0;
+
+    pthread_rwlock_wrlock(&cache_lock);
+    for (object = cache; object; object = object->next) {
+        if (!strcmp(object->key, key)) {
+            object->recent = ++cache_clock;
+            break;
+        }
+    }
+    pthread_rwlock_unlock(&cache_lock); return 1;
 }
-pthread_rwlock_unlock(&cache_lock);
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Proxy_Lab/proxylab-handout/proxy.c#L177-L205"><code>proxy.c</code> L177–L205</a> (full function) (reformatted to fit)</p>
 
 The order is approximate LRU: `cache_clock` increases monotonically, and eviction removes the object with the smallest `recent` value.
 
 Insertion and eviction stay entirely under the write lock:
 
 ``` c
-while (cache && cache_size + size > MAX_CACHE_SIZE)
-    cache_evict_lru();
+void cache_put(const char *key, const char *data, size_t size) {
+    cache_object *object;
 
-object->recent = ++cache_clock;
-object->next = cache;
-cache = object;
-cache_size += size;
+    if (size == 0 || size > MAX_OBJECT_SIZE)
+        return;
+
+    pthread_rwlock_wrlock(&cache_lock);
+    for (object = cache; object; object = object->next) {
+        if (!strcmp(object->key, key)) {
+            object->recent = ++cache_clock;
+            pthread_rwlock_unlock(&cache_lock); return;
+        }
+    }
+
+    while (cache && cache_size + size > MAX_CACHE_SIZE)
+        cache_evict_lru();
+
+    object = Malloc(sizeof(*object));
+    object->key = Malloc(strlen(key) + 1);
+    object->data = Malloc(size);
+    strcpy(object->key, key); memcpy(object->data, data, size);
+    object->size = size;
+    object->recent = ++cache_clock;
+    object->next = cache;
+    cache = object;
+    cache_size += size;
+    pthread_rwlock_unlock(&cache_lock);
+}
 ```
+
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Proxy_Lab/proxylab-handout/proxy.c#L207-L237"><code>proxy.c</code> L207–L237</a> (full function) (reformatted to fit)</p>
 
 `cache_evict_lru` linearly scans the linked list. Under a 1 MiB total-byte budget, that `O(n)` eviction cost is acceptable.
 
@@ -258,14 +354,3 @@ cache_size += size;
 | 16 simultaneous hits after origin shutdown | **16/16 identical** |
 | Recently read entry survives later eviction pressure | **Pass** |
 | Response larger than 100 KiB is not cached | **Pass** |
-
-Driver summary:
-
-``` text
-basicScore:       40/40
-concurrencyScore: 15/15
-cacheScore:       15/15
-totalScore:       70/70
-```
-
-The lab's progression matches the finished design: first make one request path correct, then give each connection its own worker, then synchronize only the state that is actually shared.
